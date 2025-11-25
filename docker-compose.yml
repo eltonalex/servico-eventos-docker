@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  sos-chuva-api:
+    build: .
+    container_name: sos-chuva-api
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    networks:
+      - sos-chuva-network
+
+networks:
+  sos-chuva-network:
+    driver: bridge
