@@ -70,7 +70,8 @@ async function initDatabase() {
 		  ('Queda de Árvore'),
           ('Rio Transbordando'),
 		  ('Neblina/Nevoeiro'),
-		  ('Queimada');
+		  ('Queimada'),
+      ('Tornado');
       `);
     }
     
