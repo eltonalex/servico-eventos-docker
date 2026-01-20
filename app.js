@@ -1,4 +1,4 @@
-// Arquivo: app.js
+// Arquivo: app.js (VERSÃO CORRIGIDA)
 const express = require('express');
 const bodyParser = require('body-parser');
 const { Pool } = require('pg');
@@ -51,6 +51,7 @@ async function initDatabase() {
         id SERIAL PRIMARY KEY,
         evento_id INTEGER REFERENCES eventos(id) ON DELETE CASCADE,
         tipo_evento_id INTEGER REFERENCES tipo_evento(id),
+        medida VARCHAR(255),
         UNIQUE(evento_id, tipo_evento_id)
       );
     `);
@@ -61,17 +62,17 @@ async function initDatabase() {
       await client.query(`
         INSERT INTO tipo_evento (descricao) VALUES 
           ('Sem Chuva'),
-		  ('Chuva Fraca'),
+          ('Chuva Fraca'),
           ('Chuva Forte'),
           ('Granizo'),
           ('Raios'),
-		  ('Deslizamento'),
+          ('Deslizamento'),
           ('Alagamento'),
-		  ('Queda de Árvore'),
+          ('Queda de Árvore'),
           ('Rio Transbordando'),
-		  ('Neblina/Nevoeiro'),
-		  ('Queimada'),
-      ('Tornado');
+          ('Neblina/Nevoeiro'),
+          ('Queimada'),
+          ('Tornado');
       `);
     }
     
@@ -89,6 +90,9 @@ class Evento {
     this.nome = dados.nome;
     this.data = dados.data;
     this.coordenadas = dados.coordenadas;
+    // ✅ NOVO: Suporte para medidas
+    this.tamanho_granizo = dados.tamanho_granizo;
+    this.altura_agua = dados.altura_agua;
   }
 
   validar() {
@@ -124,18 +128,37 @@ class Evento {
       return false;
     }
   }
+
+  // ✅ NOVO: Método para obter medida de um tipo específico
+  getMedidaParaTipo(tipoEvento) {
+    const tipoLower = tipoEvento.toLowerCase();
+    
+    if (tipoLower === 'granizo') {
+      return this.tamanho_granizo || null;
+    }
+    
+    if (tipoLower === 'alagamento') {
+      return this.altura_agua || null;
+    }
+    
+    return null;
+  }
 }
 
 // Endpoint para receber o JSON
 app.post('/api/eventos', async (req, res) => {
   try {
     const dadosRecebidos = req.body;
+    
+    console.log('📥 Dados recebidos:', JSON.stringify(dadosRecebidos, null, 2));
+    
     const evento = new Evento(dadosRecebidos);
     
     // Validar os dados recebidos
     const validacao = evento.validar();
     
     if (!validacao.valido) {
+      console.log('❌ Validação falhou:', validacao.mensagem);
       return res.status(400).json({
         sucesso: false,
         mensagem: validacao.mensagem
@@ -161,6 +184,7 @@ app.post('/api/eventos', async (req, res) => {
       );
       
       const eventoId = eventoResult.rows[0].id;
+      console.log(`✅ Evento criado com ID: ${eventoId}`);
       
       // Para cada tipo de evento, buscar o tipo_evento_id correspondente
       for (const tipoEvento of evento.eventos) {
@@ -172,18 +196,26 @@ app.post('/api/eventos', async (req, res) => {
         // Se o tipo de evento for encontrado, inserir na tabela eventos_tipos
         if (tipoResult.rows.length > 0) {
           const tipoEventoId = tipoResult.rows[0].id;
+          
+          // ✅ CORREÇÃO: Obter medida específica para este tipo
+          const medida = evento.getMedidaParaTipo(tipoEvento);
+          
           await client.query(
-            'INSERT INTO eventos_tipos(evento_id, tipo_evento_id) VALUES($1, $2)',
-            [eventoId, tipoEventoId]
+            'INSERT INTO eventos_tipos(evento_id, tipo_evento_id, medida) VALUES($1, $2, $3)',
+            [eventoId, tipoEventoId, medida]
           );
+          
+          console.log(`  ✅ Tipo '${tipoEvento}' adicionado${medida ? ` com medida: ${medida}` : ''}`);
         } else {
           // Se o tipo de evento não for encontrado, emitir um aviso
-          console.warn(`Tipo de evento não encontrado: ${tipoEvento}`);
+          console.warn(`⚠️  Tipo de evento não encontrado: ${tipoEvento}`);
         }
       }
       
       // Finalizar transação
       await client.query('COMMIT');
+      
+      console.log('✅ Transação finalizada com sucesso');
       
       // Responder com sucesso
       return res.status(201).json({
@@ -195,7 +227,7 @@ app.post('/api/eventos', async (req, res) => {
     } catch (dbError) {
       // Em caso de erro, reverter a transação
       await client.query('ROLLBACK');
-      console.error('Erro na transação do banco de dados:', dbError);
+      console.error('❌ Erro na transação do banco de dados:', dbError);
       
       return res.status(500).json({
         sucesso: false,
@@ -206,7 +238,7 @@ app.post('/api/eventos', async (req, res) => {
     }
     
   } catch (erro) {
-    console.error('Erro ao processar evento:', erro);
+    console.error('❌ Erro ao processar evento:', erro);
     return res.status(500).json({
       sucesso: false,
       mensagem: 'Erro interno do servidor'
@@ -219,10 +251,11 @@ app.get('/api/eventos', async (req, res) => {
   try {
     const client = await pool.connect();
     
-    // Consulta para obter todos os eventos com seus tipos
+    // ✅ ATUALIZADO: Incluir medidas na consulta
     const result = await client.query(`
       SELECT e.id, e.nome, e.data, e.latitude, e.longitude, e.timestamp,
-             array_agg(te.descricao) as eventos
+             array_agg(te.descricao) as eventos,
+             array_agg(et.medida) as medidas
       FROM eventos e
       LEFT JOIN eventos_tipos et ON e.id = et.evento_id
       LEFT JOIN tipo_evento te ON et.tipo_evento_id = te.id
@@ -233,17 +266,29 @@ app.get('/api/eventos', async (req, res) => {
     client.release();
     
     // Formatar os dados para o formato esperado pelo cliente
-    const eventosFormatados = result.rows.map(row => ({
-      id: row.id,
-      nome: row.nome,
-      data: row.data,
-      coordenadas: {
-        latitude: parseFloat(row.latitude),
-        longitude: parseFloat(row.longitude)
-      },
-      eventos: row.eventos || [],
-      timestamp: row.timestamp
-    }));
+    const eventosFormatados = result.rows.map(row => {
+      const eventos = row.eventos || [];
+      const medidas = row.medidas || [];
+      
+      // Criar array de objetos com tipo e medida
+      const tiposComMedidas = eventos.map((evento, index) => ({
+        tipo: evento,
+        medida: medidas[index]
+      }));
+      
+      return {
+        id: row.id,
+        nome: row.nome,
+        data: row.data,
+        coordenadas: {
+          latitude: parseFloat(row.latitude),
+          longitude: parseFloat(row.longitude)
+        },
+        eventos: eventos,
+        tipos_com_medidas: tiposComMedidas,
+        timestamp: row.timestamp
+      };
+    });
     
     res.json(eventosFormatados);
     
@@ -270,10 +315,11 @@ app.get('/api/eventos/:id', async (req, res) => {
     
     const client = await pool.connect();
     
-    // Consulta para obter o evento específico com seus tipos
+    // ✅ ATUALIZADO: Incluir medidas na consulta
     const result = await client.query(`
       SELECT e.id, e.nome, e.data, e.latitude, e.longitude, e.timestamp,
-             array_agg(te.descricao) as eventos
+             array_agg(te.descricao) as eventos,
+             array_agg(et.medida) as medidas
       FROM eventos e
       LEFT JOIN eventos_tipos et ON e.id = et.evento_id
       LEFT JOIN tipo_evento te ON et.tipo_evento_id = te.id
@@ -292,6 +338,15 @@ app.get('/api/eventos/:id', async (req, res) => {
     
     // Formatar os dados para o formato esperado pelo cliente
     const row = result.rows[0];
+    const eventos = row.eventos || [];
+    const medidas = row.medidas || [];
+    
+    // Criar array de objetos com tipo e medida
+    const tiposComMedidas = eventos.map((evento, index) => ({
+      tipo: evento,
+      medida: medidas[index]
+    }));
+    
     const eventoFormatado = {
       id: row.id,
       nome: row.nome,
@@ -300,7 +355,8 @@ app.get('/api/eventos/:id', async (req, res) => {
         latitude: parseFloat(row.latitude),
         longitude: parseFloat(row.longitude)
       },
-      eventos: row.eventos || [],
+      eventos: eventos,
+      tipos_com_medidas: tiposComMedidas,
       timestamp: row.timestamp
     };
     
@@ -336,7 +392,11 @@ app.get('/api/tipos-eventos', async (req, res) => {
 // Iniciar o servidor
 app.listen(PORT, async () => {
   await initDatabase();
-  console.log(`Servidor rodando na porta ${PORT} com PostgreSQL`);
+  console.log(`🚀 Servidor rodando na porta ${PORT} com PostgreSQL`);
+  console.log(`📍 Endpoint: POST /api/eventos`);
+  console.log(`📍 Endpoint: GET  /api/eventos`);
+  console.log(`📍 Endpoint: GET  /api/eventos/:id`);
+  console.log(`📍 Endpoint: GET  /api/tipos-eventos`);
 });
 
 module.exports = app; // Para testes
